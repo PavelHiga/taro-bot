@@ -30,6 +30,12 @@ const pendingReadings = new Map();
  */
 async function createInvoiceLink(userId, message, cards) {
   try {
+    if (!TOKEN) {
+      throw new Error('Bot token is not configured');
+    }
+    
+    console.log('Creating invoice link for userId:', userId, 'message:', message?.substring(0, 50));
+    
     // Формируем минимальный payload (максимум 128 байт для Telegram)
     const timestamp = Date.now();
     const payload = JSON.stringify({
@@ -60,24 +66,47 @@ async function createInvoiceLink(userId, message, cards) {
     };
 
     const url = `https://api.telegram.org/bot${TOKEN}/createInvoiceLink`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(invoiceParams),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Error creating invoice link:', errorText);
-      throw new Error(errorText);
-    }
-
-    const data = await response.json();
-    console.log(`✅ Invoice link created for user ${userId}:`, data.result);
+    console.log('Calling Telegram API to create invoice link...');
     
-    return data.result;
+    // Добавляем таймаут для запроса
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 секунд таймаут
+    
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(invoiceParams),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ Telegram API error:', response.status, errorText);
+        throw new Error(`Telegram API error (${response.status}): ${errorText}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.ok) {
+        console.error('❌ Telegram API returned error:', data);
+        throw new Error(data.description || 'Failed to create invoice link');
+      }
+      
+      console.log(`✅ Invoice link created for user ${userId}:`, data.result);
+      
+      return data.result;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('Request timeout: Telegram API did not respond in time');
+      }
+      throw error;
+    }
   } catch (error) {
     console.error('❌ Error creating invoice link:', error);
     throw error;
@@ -432,19 +461,89 @@ export default async function handler(req, res) {
     }
 
     // Маршрут /createInvoiceLink - для Telegram Mini App
-    if (path === '/createInvoiceLink' && method === 'POST') {
+    if (path === '/createInvoiceLink') {
+      // Устанавливаем CORS заголовки для запросов из браузера
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      
+      // Обработка preflight запросов
+      if (method === 'OPTIONS') {
+        return res.status(200).end();
+      }
+      
+      if (method !== 'POST') {
+        return res.status(405).json({ error: 'Method not allowed. Use POST.' });
+      }
+      
+      console.log('POST /createInvoiceLink received');
+      console.log('Request headers:', JSON.stringify(req.headers, null, 2));
+      
       try {
-        const { userId, message, cards } = req.body;
+        // В Vercel serverless functions body обычно уже распарсено автоматически
+        let body = req.body;
         
-        if (!userId || !message || !cards) {
-          return res.status(400).json({ error: 'Missing required fields: userId, message, cards' });
+        console.log('Raw body type:', typeof body);
+        console.log('Raw body:', body);
+        
+        // Если body это строка, парсим её
+        if (typeof body === 'string') {
+          try {
+            body = JSON.parse(body);
+            console.log('Parsed body from string:', body);
+          } catch (parseError) {
+            console.error('Error parsing JSON body:', parseError);
+            return res.status(400).json({ error: 'Invalid JSON in request body' });
+          }
+        }
+        
+        // Если body не определен или пустой
+        if (!body || (typeof body === 'object' && Object.keys(body).length === 0)) {
+          console.error('Body is empty or undefined');
+          return res.status(400).json({ 
+            error: 'Empty request body. Please send JSON with userId, message, and cards fields.',
+            hint: 'Make sure to send Content-Type: application/json header'
+          });
+        }
+        
+        const { userId, message, cards } = body;
+        
+        console.log('Extracted fields:', { 
+          userId, 
+          message: message?.substring(0, 50), 
+          cardsCount: cards?.length,
+          cardsType: Array.isArray(cards) ? 'array' : typeof cards
+        });
+        
+        // Валидация
+        if (!userId) {
+          return res.status(400).json({ error: 'Missing required field: userId' });
+        }
+        if (!message) {
+          return res.status(400).json({ error: 'Missing required field: message' });
+        }
+        if (!cards) {
+          return res.status(400).json({ error: 'Missing required field: cards' });
+        }
+        if (!Array.isArray(cards)) {
+          return res.status(400).json({ error: 'Field cards must be an array' });
+        }
+        if (cards.length === 0) {
+          return res.status(400).json({ error: 'Field cards must contain at least 1 card' });
         }
 
+        console.log('All validations passed, creating invoice link...');
         const invoiceLink = await createInvoiceLink(userId, message, cards);
+        console.log('Invoice link created successfully:', invoiceLink);
+        
         return res.status(200).json({ invoiceLink });
       } catch (error) {
         console.error('Error creating invoice link:', error);
-        return res.status(500).json({ error: error.message });
+        console.error('Error stack:', error.stack);
+        return res.status(500).json({ 
+          error: error.message || 'Internal server error',
+          details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
       }
     }
 
