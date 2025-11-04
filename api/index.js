@@ -27,20 +27,24 @@ function parseMessage(message) {
 /**
  * Отправка сообщения в Telegram
  */
-async function telSendMessage(chatId, text) {
+async function telSendMessage(chatId, text, withButtons = true) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
   const payload = {
     chat_id: chatId,
     text: text,
-    reply_markup: {
+  };
+
+  // Добавляем кнопки только если нужно
+  if (withButtons) {
+    payload.reply_markup = {
       inline_keyboard: [
         [
-          { text: "Підтвредити", callback_data: "confirm" },
-          { text: "Скасувати", callback_data: "cancel" }
+          { text: "Подтвердить", callback_data: "confirm" },
+          { text: "Отменить", callback_data: "cancel" }
         ]
       ]
-    }
-  };
+    };
+  }
 
   try {
     const response = await fetch(url, {
@@ -114,10 +118,17 @@ async function handleWebhook(req, res) {
     return res.status(200).json({ status: "ignored" });
   }
 
+  // Обработка команды /start
+  if (txt.toLowerCase() === "/start") {
+    const welcomeMessage = "Привет! 👋\n\nДобро пожаловать в нашего бота! Я готов помочь вам.";
+    await telSendMessage(chatId, welcomeMessage, false);
+    return res.status(200).send('ok');
+  }
+
   if (txt.toLowerCase() === "hi") {
     await telSendMessage(chatId, "Кнопка!!");
   } else {
-    await telSendMessage(chatId, "Авторизація");
+    await telSendMessage(chatId, "Авторизация");
   }
 
   return res.status(200).send('ok');
