@@ -114,52 +114,6 @@ async function createInvoiceLink(userId, message, cards) {
 }
 
 /**
- * Отправка invoice для оплаты
- */
-async function sendInvoice(chatId, message, cards) {
-  const url = `https://api.telegram.org/bot${TOKEN}/sendInvoice`;
-  const userId = pendingReadings.get(chatId)?.userId || chatId;
-  
-  const payload = JSON.stringify({
-    userId,
-    message,
-    cards,
-    timestamp: Date.now()
-  });
-
-  const invoicePayload = {
-    chat_id: chatId,
-    title: '🔮 Расклад Таро',
-    description: 'Персональный расклад из 3 карт Таро с подробным толкованием от AI',
-    payload: payload,
-    provider_token: '', // Пустая строка для Telegram Stars
-    currency: 'XTR', // Telegram Stars
-    prices: [{ label: 'Расклад Таро', amount: 50 }], // 50 звезд
-  };
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(invoicePayload),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.log("Ошибка отправки invoice:", errorText);
-      throw new Error(errorText);
-    }
-
-    return response;
-  } catch (error) {
-    console.error("Ошибка отправки invoice:", error);
-    throw error;
-  }
-}
-
-/**
  * Выполнение гадания
  */
 async function performReading(chatId, message, cards) {
@@ -543,6 +497,99 @@ export default async function handler(req, res) {
         return res.status(500).json({ 
           error: error.message || 'Internal server error',
           details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+      }
+    }
+
+    // Маршрут /reading-paid - для получения результата гадания после оплаты
+    if (path === '/reading-paid') {
+      // Устанавливаем CORS заголовки
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      
+      // Обработка preflight запросов
+      if (method === 'OPTIONS') {
+        return res.status(200).end();
+      }
+      
+      console.log(`${method} /reading-paid received`);
+      
+      try {
+        let userId;
+        
+        if (method === 'GET') {
+          // Получаем userId из query параметров
+          const urlObj = new URL(url, `http://${req.headers.host}`);
+          userId = urlObj.searchParams.get('userId');
+        } else if (method === 'POST') {
+          // Получаем userId из body
+          let body = req.body;
+          
+          if (typeof body === 'string') {
+            try {
+              body = JSON.parse(body);
+            } catch (parseError) {
+              return res.status(400).json({ error: 'Invalid JSON in request body' });
+            }
+          }
+          
+          userId = body?.userId;
+        } else {
+          return res.status(405).json({ error: 'Method not allowed. Use GET or POST.' });
+        }
+        
+        if (!userId) {
+          return res.status(400).json({ error: 'Missing required field: userId' });
+        }
+        
+        // Преобразуем userId в число если это строка
+        const userIdNum = typeof userId === 'string' ? parseInt(userId, 10) : userId;
+        
+        if (isNaN(userIdNum)) {
+          return res.status(400).json({ error: 'Invalid userId format. Must be a number.' });
+        }
+        
+        console.log('Processing reading for userId:', userIdNum);
+        
+        // Проверяем, есть ли данные в pendingReadings
+        const pendingData = pendingReadings.get(userIdNum);
+        
+        if (!pendingData) {
+          return res.status(404).json({ 
+            error: 'Reading not found or already processed',
+            message: 'No pending reading found for this userId. The reading may have been already processed or payment was not completed.'
+          });
+        }
+        
+        // Выполняем гадание через getTarotReading
+        console.log('Executing reading via getTarotReading for question:', pendingData.message);
+        const reading = await tarotService.getTarotReading(pendingData.message, pendingData.cards);
+        
+        if (!reading.success || !reading.data) {
+          throw new Error('Failed to get reading result from AI');
+        }
+        
+        // Удаляем из pendingReadings после получения результата
+        pendingReadings.delete(userIdNum);
+        
+        console.log('Reading completed successfully for userId:', userIdNum);
+        
+        // Возвращаем результат гадания
+        return res.status(200).json({
+          success: true,
+          userId: userIdNum,
+          question: pendingData.message,
+          cards: reading.data.cards,
+          summary: reading.data.summary,
+          originalMessage: reading.originalMessage,
+          cardsData: reading.cards
+        });
+        
+      } catch (error) {
+        console.error('Error in /reading-paid:', error);
+        return res.status(500).json({ 
+          error: error.message || 'Internal server error'
         });
       }
     }
