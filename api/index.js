@@ -337,6 +337,46 @@ async function handleWebhook(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // Обработка обычного сообщения
+    if (msg.message && msg.message.text) {
+      const chatId = msg.message.chat.id;
+      const txt = msg.message.text;
+      
+      // Обработка команды /start
+      if (txt.toLowerCase() === "/start" || txt.toLowerCase().startsWith("/start ")) {
+        const welcomeMessage = 
+          '🔮 *Привет! Я помогу тебе с раскладом Таро!*\n\n' +
+          '✨ Я создам персональный прогноз на любой твой вопрос.\n\n' +
+          '📝 *Как это работает:*\n' +
+          '1. Открой приложение Taro AI\n' +
+          '2. Задай свой вопрос\n' +
+          '3. Выбери 3 карты\n' +
+          '4. Получи подробное толкование от AI\n\n' +
+          '💡 *Пример вопроса:*\n' +
+          '_"Буду ли я встречаться с Никитой?"_\n\n' +
+          '🃏 *Пример расклада:*\n' +
+          '_"Влюбленные, Справедливость, 6 мечей"_\n\n' +
+          '📱 *Как открыть приложение:*\n' +
+          'Выбери в левом нижнем углу *"Открыть Taro AI"*\n\n' +
+          '_P.S. Если что-то не работает, попробуй написать /start заново_';
+        
+        const sendMessageUrl = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
+        await fetch(sendMessageUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: welcomeMessage,
+            parse_mode: 'Markdown'
+          }),
+        });
+        
+        return res.status(200).json({ ok: true });
+      }
+    }
+
     return res.status(200).json({ ok: true });
   } catch (error) {
     console.error("Ошибка обработки вебхука:", error);
