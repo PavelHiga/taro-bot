@@ -26,6 +26,65 @@ const tarotService = getTaroService();
 const pendingReadings = new Map();
 
 /**
+ * Создание invoice link для Telegram Mini App
+ */
+async function createInvoiceLink(userId, message, cards) {
+  try {
+    // Формируем минимальный payload (максимум 128 байт для Telegram)
+    const timestamp = Date.now();
+    const payload = JSON.stringify({
+      u: userId,
+      t: timestamp
+    });
+
+    if (payload.length > 128) {
+      console.error('❌ Payload too long:', payload.length, 'bytes (max 128)');
+      throw new Error('Payload exceeds Telegram limit of 128 bytes');
+    }
+
+    // Сохраняем данные для после оплаты
+    pendingReadings.set(userId, {
+      userId: userId,
+      message: message,
+      cards: cards,
+      timestamp: timestamp
+    });
+
+    const invoiceParams = {
+      title: 'Расклад Таро',
+      description: 'Персональный расклад из 3 карт Таро с подробным толкованием от AI',
+      payload: payload,
+      provider_token: '', // Пустая строка для Telegram Stars
+      currency: 'XTR', // Telegram Stars
+      prices: [{ label: 'Расклад Таро', amount: 50 }], // 50 звезд
+    };
+
+    const url = `https://api.telegram.org/bot${TOKEN}/createInvoiceLink`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(invoiceParams),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('❌ Error creating invoice link:', errorText);
+      throw new Error(errorText);
+    }
+
+    const data = await response.json();
+    console.log(`✅ Invoice link created for user ${userId}:`, data.result);
+    
+    return data.result;
+  } catch (error) {
+    console.error('❌ Error creating invoice link:', error);
+    throw error;
+  }
+}
+
+/**
  * Отправка invoice для оплаты
  */
 async function sendInvoice(chatId, message, cards) {
@@ -76,9 +135,6 @@ async function sendInvoice(chatId, message, cards) {
  */
 async function performReading(chatId, message, cards) {
   try {
-    // Показываем индикатор "печатает..."
-    await sendChatAction(chatId, 'typing');
-    
     // Выполняем запрос к сервису Таро
     const reading = await tarotService.getTarotReading(message, cards);
     
@@ -107,7 +163,19 @@ async function performReading(chatId, message, cards) {
         });
       }
       
-      await telSendMessage(chatId, response, { parseMode: 'Markdown' });
+      // Отправляем результат через Telegram API
+      const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
+      await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: response,
+          parse_mode: 'Markdown'
+        }),
+      });
       
     } else {
       throw new Error('Invalid reading response');
@@ -115,12 +183,19 @@ async function performReading(chatId, message, cards) {
     
   } catch (error) {
     console.error('Error performing reading:', error);
-    await telSendMessage(
-      chatId,
-      '❌ Произошла ошибка при выполнении гадания.\n' +
-      'Пожалуйста, свяжитесь с поддержкой для возврата средств.',
-      { parseMode: 'Markdown' }
-    );
+    // Отправляем сообщение об ошибке через Telegram API
+    const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
+    await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: '❌ Произошла ошибка при выполнении гадания.\nПожалуйста, свяжитесь с поддержкой для возврата средств.',
+        parse_mode: 'Markdown'
+      }),
+    });
   }
 }
 
@@ -209,84 +284,56 @@ async function handleWebhook(req, res) {
       
       console.log('Successful payment received:', payment);
       
-      await telSendMessage(chatId, '✅ Оплата прошла успешно! Начинаю гадание...', { parseMode: 'Markdown' });
+      // Отправляем сообщение об успешной оплате
+      const sendMessageUrl = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
+      await fetch(sendMessageUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: '✅ Оплата прошла успешно! Начинаю гадание...',
+          parse_mode: 'Markdown'
+        }),
+      });
       
       // Получаем данные из payload
-      const payloadData = JSON.parse(payment.invoice_payload);
-      const { message, cards } = payloadData;
+      let message, cards;
+      try {
+        const payloadData = JSON.parse(payment.invoice_payload);
+        // Если payload содержит только u и t, получаем данные из pendingReadings
+        if (payloadData.u && payloadData.t) {
+          const pendingData = pendingReadings.get(payloadData.u);
+          if (pendingData) {
+            message = pendingData.message;
+            cards = pendingData.cards;
+          } else {
+            throw new Error('Pending reading not found');
+          }
+        } else {
+          message = payloadData.message;
+          cards = payloadData.cards;
+        }
+      } catch (error) {
+        console.error('Error parsing payload:', error);
+        // Пытаемся получить из pendingReadings по userId
+        const pendingData = pendingReadings.get(userId);
+        if (pendingData) {
+          message = pendingData.message;
+          cards = pendingData.cards;
+        } else {
+          throw new Error('Could not retrieve payment data');
+        }
+      }
       
       // Выполняем гадание
       await performReading(chatId, message, cards);
       
       // Удаляем из ожидания
+      pendingReadings.delete(userId);
       pendingReadings.delete(chatId);
       
-      return res.status(200).json({ ok: true });
-    }
-
-    // Обработка callback_query (нажатие кнопки)
-    if (msg.callback_query) {
-      const callback = msg.callback_query;
-      const chatId = callback.message.chat.id;
-      const messageId = callback.message.message_id;
-      console.log(`Нажата кнопка. Удаляю сообщение ${messageId} из чата ${chatId}`);
-      
-      // Удаляем сообщение
-      await deleteMessage(chatId, messageId);
-
-      return res.status(200).json({ ok: true });
-    }
-
-    // Обработка обычного сообщения
-    const [chatId, txt, userId] = parseMessage(msg);
-    if (chatId === null || txt === null) {
-      return res.status(200).json({ ok: true });
-    }
-
-    // Обработка команды /start
-    if (txt.toLowerCase() === "/start") {
-      const welcomeMessage = 
-        '🔮 *Привет! Я помогу тебе с раскладом Таро!*\n\n' +
-        '✨ Я создам персональный прогноз на любой твой вопрос.\n\n' +
-        '📝 *Как это работает:*\n' +
-        '1. Открой приложение Taro AI\n' +
-        '2. Задай свой вопрос\n' +
-        '3. Выбери 3 карты\n' +
-        '4. Получи подробное толкование от AI\n\n' +
-        '💡 *Пример вопроса:*\n' +
-        '_"Буду ли я встречаться с Никитой?"_\n\n' +
-        '🃏 *Пример расклада:*\n' +
-        '_"Влюбленные, Справедливость, 6 мечей"_\n\n' +
-        '📱 *Как открыть приложение:*\n' +
-        'Выбери в левом нижнем углу *"Открыть Taro AI"*\n\n' +
-        '_P.S. Если что-то не работает, попробуй написать /start заново_';
-      
-      await telSendMessage(chatId, welcomeMessage, { parseMode: 'Markdown' });
-      return res.status(200).json({ ok: true });
-    }
-
-    // Обработка текстовых сообщений (вопрос пользователя)
-    // Если пользователь отправил сообщение, генерируем карты и отправляем invoice
-    if (txt && txt.length > 0 && txt.toLowerCase() !== "hi") {
-      // Генерируем случайные карты
-      const cards = getRandomCards();
-      
-      // Сохраняем данные для после оплаты
-      pendingReadings.set(chatId, {
-        userId: userId,
-        message: txt,
-        cards: cards,
-        timestamp: Date.now()
-      });
-      
-      // Отправляем invoice
-      await sendInvoice(chatId, txt, cards);
-      return res.status(200).json({ ok: true });
-    }
-
-    // Обработка команды hi (старая логика)
-    if (txt.toLowerCase() === "hi") {
-      await telSendMessage(chatId, "Кнопка!!");
       return res.status(200).json({ ok: true });
     }
 
@@ -342,6 +389,23 @@ export default async function handler(req, res) {
     // Маршрут /webhook
     if (path === '/webhook' && method === 'POST') {
       return await handleWebhook(req, res);
+    }
+
+    // Маршрут /createInvoiceLink - для Telegram Mini App
+    if (path === '/createInvoiceLink' && method === 'POST') {
+      try {
+        const { userId, message, cards } = req.body;
+        
+        if (!userId || !message || !cards) {
+          return res.status(400).json({ error: 'Missing required fields: userId, message, cards' });
+        }
+
+        const invoiceLink = await createInvoiceLink(userId, message, cards);
+        return res.status(200).json({ invoiceLink });
+      } catch (error) {
+        console.error('Error creating invoice link:', error);
+        return res.status(500).json({ error: error.message });
+      }
     }
 
     // Маршрут / (главная страница)
