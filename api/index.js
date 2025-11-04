@@ -575,15 +575,21 @@ export default async function handler(req, res) {
         
         console.log('Reading completed successfully for userId:', userIdNum);
         
-        // Возвращаем результат гадания
+        // Формируем правильный формат ответа
+        const parsedCards = reading.data.cards || [];
+        
+        // Возвращаем результат гадания в правильном формате
         return res.status(200).json({
           success: true,
-          userId: userIdNum,
-          question: pendingData.message,
-          cards: reading.data.cards,
-          summary: reading.data.summary,
-          originalMessage: reading.originalMessage,
-          cardsData: reading.cards
+          data: {
+            cards: parsedCards.map(card => ({
+              position: card.position,
+              name_ru: card.name_ru,
+              name_en: card.name_en,
+              image: card.image || null
+            })),
+            summary: reading.data.summary
+          }
         });
         
       } catch (error) {
