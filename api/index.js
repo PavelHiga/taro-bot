@@ -62,7 +62,7 @@ async function createInvoiceLink(userId, message, cards) {
       payload: payload,
       provider_token: '', // Пустая строка для Telegram Stars
       currency: 'XTR', // Telegram Stars
-      prices: [{ label: 'Расклад Таро', amount: 1000 }], // 25 звезд
+      prices: [{ label: 'Расклад Таро', amount: 25 }], // 25 звезд
     };
 
     const url = `https://api.telegram.org/bot${TOKEN}/createInvoiceLink`;
